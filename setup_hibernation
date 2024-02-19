@@ -1,0 +1,68 @@
+#!/bin/bash
+
+# Strict mode.
+set -euo pipefail
+
+# Check if root or elevate.
+if [ "$(id -u)" != 0 ]; then
+	exec sudo "$0" "$@"
+fi
+
+# Unlock the root partition.
+sudo frzr-unlock
+
+# Configure systemd to hibernate when asked to suspend.
+mkdir -p /etc/systemd/sleep.conf.d/
+echo '[Sleep]
+SuspendState=hibernate' > /etc/systemd/sleep.conf.d/hibernate_on_suspend.conf
+
+# TODO:
+# Investigate setting a larger hibernation file size
+# to make hibernation faster.
+# https://wiki.archlinux.org/title/Systemd#systemd-tmpfiles_-_temporary_files
+
+# Create hibernation file if it doesn't exist.
+#
+# We are taking the kernel hibernation image size
+# and converting it from bytes to megabytes.
+#
+# We then add 1 megabyte to cover any bytes truncated
+# by the conversion.
+#
+# The reason for doing this is that it's faster to
+# write 1 megabyte at a time than 1 byte at a time.
+
+size=$(("$(cat /sys/power/image_size)" / 1000000 + 1))
+swapfile=/home/gamer/swap
+
+if ! [ -f "$swapfile" ]; then
+	dd \
+		if=/dev/zero \
+		of="$swapfile" \
+		bs=1M \
+		count="$size" \
+		status=progress
+
+	chmod 0600 "$swapfile"
+	mkswap -U clear "$swapfile"
+	swapon "$swapfile"
+fi
+
+# Update fstab if needed.
+if ! grep -q "$swapfile" /etc/fstab; then
+	echo "$swapfile none swap defaults 0 0" >> /etc/fstab
+	systemctl daemon-reload
+fi
+
+# Configure initramfs with systemd hook.
+#
+# We first check if the systemd hook has already been
+# added to the configuration, then we rebuild the
+# initramfs.
+#
+# The udev and resume hooks are provided by systemd.
+
+if ! grep -q 'HOOKS=(.*systemd' /etc/mkinitcpio.conf; then
+	sed -i 's/udev/systemd/' /etc/mkinitcpio.conf
+	mkinitcpio -p chimeraos
+fi
